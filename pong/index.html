@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    * { box-sizing: border-box; }
+    :root { --primary: #ff4b4b; --text: #31333f; --bg: #ffffff; --sec: #f0f2f6;
+      --font: "Source Sans Pro", sans-serif; }
+    body { margin: 0; font: 16px var(--font); color: var(--text); background: transparent; }
+    .game { padding: 4px 0 8px; }
+    p { margin: 0 0 12px; line-height: 1.5; }
+    .hint { font-size: 14px; opacity: .65; }
+    canvas { display: block; width: 100%; max-width: 400px; height: auto; margin: auto;
+      aspect-ratio: 2 / 3; background: var(--sec); border-radius: .5rem; touch-action: none; }
+    canvas:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+    .controls { display: flex; justify-content: center; gap: 8px; margin: 12px 0; }
+    button { background: var(--bg); color: var(--text); border: 1px solid rgba(128,128,128,.35);
+      border-radius: .5rem; min-height: 2.5rem; padding: .25rem .75rem;
+      cursor: pointer; font: inherit; }
+    button:hover:not(:disabled) { border-color: var(--primary); color: var(--primary); }
+    button:active:not(:disabled) { background: var(--primary); color: #fff; }
+    button:disabled { opacity: .4; cursor: default; }
+    #status { margin: 0; min-height: 21px; text-align: center; font-size: 14px; opacity: .75; }
+  </style>
+</head>
+<body>
+  <div class="game">
+    <p class="hint" style="text-align:center">Use ←/→ ou A/D, ou arraste o dedo na quadra. Espaço pausa.</p>
+    <canvas id="court" width="400" height="600" tabindex="0"
+      aria-label="Quadra de pongue vertical. Use esquerda e direita ou arraste o dedo."></canvas>
+    <div class="controls">
+      <button id="start">Iniciar</button>
+      <button id="pause" disabled>Pausar</button>
+      <button id="reset">Reiniciar</button>
+    </div>
+    <p id="status" role="status" aria-live="polite">Pronto para jogar.</p>
+  </div>
+  <script>
+    const canvas = document.getElementById('court');
+    const ctx = canvas.getContext('2d');
+    const start = document.getElementById('start');
+    const pause = document.getElementById('pause');
+    const status = document.getElementById('status');
+    const W = 400, H = 600, paddleH = 12, paddleW = 80, radius = 8;
+    const keys = new Set();
+    let player = 160, computer = 160, running = false, started = false;
+    let ball, previous = 0, c = {};
+    let score = 0, opponent = 0, best = 0, serveDelay = 0;
+    let gameOver = false;
+    function send(type, data = {}) {
+      window.parent.postMessage({ isStreamlitMessage: true, type, ...data }, '*');
+    }
+    function scoreboard() {
+      canvas.setAttribute('aria-label', `Pongue vertical. Você: ${score}. Bot: ${opponent}. Recorde: ${best}. Use esquerda e direita ou arraste o dedo.`);
+    }
+    window.addEventListener('message', event => {
+      if (event.source !== window.parent || event.data.type !== 'streamlit:render') return;
+      applyTheme(event.data.theme);
+      best = Math.max(best, event.data.args.best || 0);
+      scoreboard();
+      send('streamlit:setFrameHeight', { height: document.body.scrollHeight + 10 });
+    });
+    new ResizeObserver(() => {
+      send('streamlit:setFrameHeight', { height: document.body.scrollHeight + 10 });
+    }).observe(document.querySelector('.game'));
+    const clamp = (value, low, high) => Math.max(low, Math.min(high, value));
+
+    function serve() {
+      ball = { x: W / 2, y: H / 2, vx: (Math.random() < .5 ? -1 : 1) * 120, vy: 300 };
+    }
+    function applyTheme(t) {
+      if (!t) return;
+      const r = document.documentElement.style;
+      if (t.primaryColor) r.setProperty('--primary', t.primaryColor);
+      if (t.textColor) r.setProperty('--text', t.textColor);
+      if (t.backgroundColor) r.setProperty('--bg', t.backgroundColor);
+      if (t.secondaryBackgroundColor) r.setProperty('--sec', t.secondaryBackgroundColor);
+      if (t.font) r.setProperty('--font', t.font);
+      readColors();
+    }
+    function readColors() {
+      const cs = getComputedStyle(document.documentElement);
+      const get = name => cs.getPropertyValue(name).trim();
+      c = { primary: get('--primary'), text: get('--text'), bg: get('--bg'), font: get('--font') };
+    }
+    function draw() {
+      ctx.clearRect(0, 0, W, H);
+      ctx.globalAlpha = .25; ctx.strokeStyle = c.text;
+      ctx.setLineDash([8, 10]);
+      ctx.beginPath(); ctx.moveTo(0, H / 2); ctx.lineTo(W, H / 2); ctx.stroke();
+      ctx.setLineDash([]); ctx.globalAlpha = 1;
+      ctx.textAlign = 'center';
+      ctx.fillStyle = c.text; ctx.font = `18px ${c.font}`;
+      ctx.fillText(`Bot ${opponent}  ·  Você ${score}  ·  Recorde ${best}`, W / 2, H / 2 - 16);
+      ctx.fillStyle = c.primary; ctx.fillRect(player, H - 36, paddleW, paddleH);
+      ctx.fillStyle = c.text; ctx.fillRect(computer, 24, paddleW, paddleH);
+      ctx.beginPath(); ctx.arc(ball.x, ball.y, radius, 0, Math.PI * 2); ctx.fill();
+      if (gameOver) {
+        ctx.fillStyle = c.bg; ctx.fillRect(40, H / 2 + 10, W - 80, 90);
+        ctx.fillStyle = c.text; ctx.font = `bold 22px ${c.font}`;
+        ctx.fillText('Fim de jogo', W / 2, H / 2 + 45);
+        ctx.font = `18px ${c.font}`;
+        ctx.fillText(`Você ${score} × ${opponent} Bot`, W / 2, H / 2 + 78);
+      }
+    }
+    function setRunning(value) {
+      running = value;
+      pause.textContent = value ? 'Pausar' : 'Continuar';
+      start.disabled = started;
+      pause.disabled = !started;
+    }
+    function togglePause() {
+      if (!started) return;
+      setRunning(!running);
+      keys.clear();
+      status.textContent = running ? 'Bola em jogo.' : 'Jogo pausado.';
+    }
+    function bounce(paddleX, direction) {
+      const offset = clamp((ball.x - paddleX - paddleW / 2) / (paddleW / 2), -1, 1);
+      const speed = Math.min(650, Math.hypot(ball.vx, ball.vy) + 20);
+      ball.vx = speed * Math.sin(offset * Math.PI / 3);
+      ball.vy = direction * speed * Math.cos(offset * Math.PI / 3);
+    }
+    function update(dt) {
+      const movement = Number(keys.has('arrowright') || keys.has('d'))
+        - Number(keys.has('arrowleft') || keys.has('a'));
+      player = clamp(player + movement * 440 * dt, 0, W - paddleW);
+      computer = clamp(computer + clamp(ball.x - computer - paddleW / 2,
+        -220 * dt, 220 * dt), 0, W - paddleW);
+      if (serveDelay > 0) {
+        serveDelay -= dt;
+        return;
+      }
+      ball.x += ball.vx * dt;
+      ball.y += ball.vy * dt;
+      if (ball.x < radius || ball.x > W - radius) {
+        ball.x = clamp(ball.x, radius, W - radius);
+        ball.vx *= -1;
+      }
+      if (ball.vy > 0 && ball.y + radius >= H - 36 && ball.y - radius <= H - 24
+          && ball.x + radius >= player && ball.x - radius <= player + paddleW) {
+        ball.y = H - 36 - radius; bounce(player, -1);
+      }
+      if (ball.vy < 0 && ball.y - radius <= 36 && ball.y + radius >= 24
+          && ball.x + radius >= computer && ball.x - radius <= computer + paddleW) {
+        ball.y = 36 + radius; bounce(computer, 1);
+      }
+      if (ball.y < -radius || ball.y > H + radius) {
+        const won = ball.y < 0;
+        if (won) score += 1;
+        else opponent += 1;
+        if (score > best) {
+          best = score;
+          send('streamlit:setComponentValue', { value: best, dataType: 'json' });
+        }
+        scoreboard();
+        if (won) {
+          status.textContent = 'Ponto seu! Próximo saque…';
+          serve();
+          serveDelay = .8;
+        } else {
+          gameOver = true;
+          started = false;
+          setRunning(false);
+          keys.clear();
+          start.textContent = 'Jogar novamente';
+          status.textContent = `Fim de jogo! Você fez ${score} ponto(s).`;
+        }
+      }
+    }
+    function frame(time) {
+      const dt = Math.min((time - previous) / 1000, .025);
+      previous = time;
+      if (running) update(dt);
+      draw();
+      requestAnimationFrame(frame);
+    }
+    start.onclick = () => {
+      if (gameOver) resetGame();
+      started = true;
+      setRunning(true);
+      status.textContent = 'Bola em jogo.';
+      canvas.focus();
+    };
+    pause.onclick = () => { togglePause(); canvas.focus(); };
+    function resetGame() {
+      gameOver = false;
+      started = false;
+      setRunning(false);
+      player = computer = 160;
+      score = opponent = 0;
+      serveDelay = 0;
+      scoreboard();
+      keys.clear();
+      serve();
+      start.textContent = 'Iniciar';
+      status.textContent = 'Pronto para jogar.';
+      draw();
+    }
+    document.getElementById('reset').onclick = resetGame;
+    canvas.addEventListener('keydown', event => {
+      const key = event.key.toLowerCase();
+      if (['arrowleft', 'arrowright', 'a', 'd', ' '].includes(key)) {
+        event.preventDefault();
+        if (key === ' ' && !event.repeat) togglePause();
+        else keys.add(key);
+      }
+    });
+    window.addEventListener('keyup', event => keys.delete(event.key.toLowerCase()));
+    function movePointer(event) {
+      if (!running) return;
+      const rect = canvas.getBoundingClientRect();
+      player = clamp((event.clientX - rect.left) * W / rect.width - paddleW / 2,
+        0, W - paddleW);
+    }
+    canvas.addEventListener('pointermove', movePointer);
+    canvas.addEventListener('pointerdown', event => {
+      canvas.focus();
+      canvas.setPointerCapture(event.pointerId);
+      movePointer(event);
+    });
+    canvas.addEventListener('pointercancel', () => keys.clear());
+    function autoPause() { keys.clear(); if (running) togglePause(); }
+    window.addEventListener('blur', autoPause);
+    document.addEventListener('visibilitychange', () => { if (document.hidden) autoPause(); });
+    readColors();
+    serve();
+    send('streamlit:componentReady', { apiVersion: 1 });
+    requestAnimationFrame(frame);
+  </script>
+</body>
+</html>
